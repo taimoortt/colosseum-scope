@@ -224,6 +224,8 @@ def get_nodes_ip(active_nodes: list) -> tuple:
 def elect_bs(my_node_id: int, bs_ue_num: int) -> bool:
     return my_node_id % (bs_ue_num + 1) == 1
 
+def elect_bs_custom(my_node_id: int, bs_ids: list) -> bool:
+    return my_node_id in bs_ids
 
 # find Colosseum Node ID of serving base station
 def get_serving_bs_id(my_node_id: int, bs_ue_num: int) -> int:
@@ -238,6 +240,17 @@ def get_serving_bs_id(my_node_id: int, bs_ue_num: int) -> int:
 
     return -1
 
+def get_serving_bs_id_custom(my_node_id: int, ue_ids: dict) -> int:
+    for ue_id, bs_id in ue_ids.items():
+        if my_node_id == ue_id:
+            return bs_id
+        else:
+            logging.error('This UE does not exist in the UE IDs list. Exiting')
+            exit(1)
+
+    logging.warning('Node ID of serving base station not found')
+
+    return -1
 
 # get Colosseum tr0 IP addresses of nodes I am serving
 # same idea of elect_bs
@@ -256,6 +269,14 @@ def get_my_users_ip(my_node_id: int, bs_ue_num: int, nodes_ip: dict) -> dict:
 
     return my_users_ip
 
+def get_my_users_ip_custom(my_node_id: int, ue_ids:dict, nodes_ip: dict) -> dict:
+    my_users_ip = dict()
+
+    for ue_id, bs_id in ue_ids.items():
+        if bs_id == my_node_id:
+            my_users_ip[ue_id] = nodes_ip[ue_id]
+
+    return my_users_ip
 
 # print previously parsed configuration
 def print_configuration(config: dict) -> None:
@@ -438,6 +459,27 @@ def is_node_bs(bs_ue_num: int, use_colosseumcli: bool) -> tuple:
 
     return is_bs, my_ip, my_node_id, nodes_ip, bs_ue_num
 
+def is_node_bs_custom(bs_ids: list, use_colosseumcli: bool) -> bool:
+    if use_colosseumcli:
+        active_nodes = get_active_nodes_colosseumcli()
+    else:
+        active_nodes = get_active_nodes_nmap()
+
+    logging.info('Active nodes: ' + str(active_nodes))
+
+    if len(active_nodes.keys()) == 0 and use_colosseumcli:
+        logging.error('No nodes found, exiting. ' + \
+            'Did you start the Colosseum scenario (colosseumcli rf start <scenario-number> -c)? ' + \
+            'If in batch mode, disable the colosseumcli option in the configuration file')
+        exit(1)
+    
+    my_ip, my_node_id, nodes_ip = get_nodes_ip(active_nodes)
+    logging.info('My tr0 IP: ' + my_ip + ' , my node ID: ' + str(my_node_id))
+    logging.info('Nodes IPs ' + str(nodes_ip))
+
+    is_bs = elect_bs_custom(my_node_id, bs_ids)
+
+    return is_bs, my_ip, my_node_id, nodes_ip
 
 # start iperf client in reverse mode
 def start_iperf_client(tmux_session_name: str, server_ip: str, client_ip: str) -> None:
@@ -477,7 +519,8 @@ def start_iperf_server(client_ip) -> None:
 # write scope configuration, srsLTE parameters and start cellular applicaitons
 def run_scope(bs_ue_num: int, iperf: bool, use_colosseumcli: bool,
     capture_pkts: bool, config_params: dict, write_config_parameters: bool,
-    generic_testbed: bool, node_is_bs: bool, ue_id: int):
+    generic_testbed: bool, node_is_bs: bool, ue_id: int,
+    bs_ids: list, ue_ids: dict):
 
     # define name of the tmux session in which commands are run
     tmux_session_name = 'scope'
@@ -504,7 +547,8 @@ def run_scope(bs_ue_num: int, iperf: bool, use_colosseumcli: bool,
 
         logging.info('my node ID: ' + str(my_node_id))
     else:
-        is_bs, my_ip, my_node_id, nodes_ip, bs_ue_num = is_node_bs(bs_ue_num, use_colosseumcli)
+        # is_bs, my_ip, my_node_id, nodes_ip, bs_ue_num = is_node_bs(bs_ue_num, use_colosseumcli)
+        is_bs, my_ip, my_node_id, nodes_ip = is_node_bs_custom(bs_ids, use_colosseumcli)
 
     # default srsLTE base station IP from the BS perspective
     srslte_bs_ip = '172.16.0.1'
@@ -545,7 +589,8 @@ def run_scope(bs_ue_num: int, iperf: bool, use_colosseumcli: bool,
             _, srs_imsi_id_mapping = get_srsue_ip_mapping(my_node_id, None, srslte_config_dir)
         else:
             # get Colosseum IPs of users I am serving
-            my_users_ip = get_my_users_ip(my_node_id, bs_ue_num, nodes_ip)
+            # my_users_ip = get_my_users_ip(my_node_id, bs_ue_num, nodes_ip)
+            my_users_ip = get_my_users_ip_custom(my_node_id, ue_ids, nodes_ip)
             logging.info('My users IPs ' + str(my_users_ip))
 
             # get mapping of srsLTE UE addresses and IPs
@@ -596,7 +641,7 @@ def run_scope(bs_ue_num: int, iperf: bool, use_colosseumcli: bool,
 
         # find Colosseum Node ID of base station that is serving me
         if not generic_testbed:
-            bs_id = get_serving_bs_id(my_node_id, bs_ue_num)
+            bs_id = get_serving_bs_id_custom(my_node_id, bs_ue_num)
 
             # get mapping of srsLTE UE addresses and IPs
             srs_col_ip_mapping, _ = get_srsue_ip_mapping(bs_id, nodes_ip, srslte_config_dir)
@@ -662,7 +707,7 @@ if __name__ == '__main__':
         The other arguments are ignored if config file is passed')
     parser.add_argument('--iperf', help='Generate traffic through iperf3, downlink only. Only used if running on Colosseum', action='store_true')
     parser.add_argument('--users-bs', type=int, default=3, help='Maximum number of users per base station')
-    parser.add_argument('--colcli', help='Use colosseumcli APIs to get list of active nodes.\
+    parser.add_argument('--colosseumcli', help='Use colosseumcli APIs to get list of active nodes.\
         This parameter is specific to Colosseum and it is only available in interactive mode', action='store_true')
     parser.add_argument('--write-config-parameters', help='If enabled, writes configuration parameters on file. Done at the base station-side',\
         action='store_true')
@@ -810,6 +855,29 @@ if __name__ == '__main__':
         if config.get('colosseumcli') is None:
             config['colosseumcli'] = False
 
+        if config.get('bs-ids') is None:
+            logging.error('Base station IDs not specified. Will be using the default method.')
+        else:
+            # Strip the square brackets and parse as a list of ints
+            config['bs_ids'] = list(map(int, config.pop('bs-ids').strip('[]').split(',')))
+        
+        if config.get('ue-ids') is None:
+            logging.error('UE IDs not specified. Will be using the default method.')
+        else:
+            # Strip the curly braces and parse as a dictionary of ints
+            ue_ids_str = config.pop('ue-ids').strip('{}')
+            ue_ids_dict = {}
+            for item in ue_ids_str.split(','):
+                k, v = map(int, item.split(':'))
+                if v not in config['bs_ids']:
+                    logging.error('BS ' + v + ' has a UE but not listed in BS IDs. Exiting')
+                    exit(1)
+                ue_ids_dict[k] = v  # Assuming the value should be a list of integers
+            config['ue_ids'] = ue_ids_dict
+            if (len(ue_ids_dict.keys()) == 0):
+                logging.error('No UEs. Exiting')
+                exit(1)
+
     print_configuration(config)
     config_params = get_config_params(config)
 
@@ -829,8 +897,8 @@ if __name__ == '__main__':
     run_scope(config['users-bs'], config['iperf'],
         config['colosseumcli'], config['capture-pkts'],
         config_params, config['write-config-parameters'],
-        config['generic-testbed'], config['node-is-bs'],
-        config['ue-id'])
+        config['generic-testbed'], config['node-is-bs'],config['ue-id'],
+        config['bs_ids'], config['ue_ids'])
 
     # set LTE transceiver state to active
     time.sleep(2)
