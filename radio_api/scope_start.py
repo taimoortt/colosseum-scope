@@ -31,7 +31,7 @@ from support_functions import run_tmux_command
 # | Node 3 |   8 |      1 |      2 |
 # | Node 4 |   9 |      1 |      2 |
 # +--------+-----+--------+--------+
-def get_active_nodes_colosseumcli() -> dict:
+def get_active_nodes_colosseumcli(faulty_nodes:list) -> dict:
     logging.info('Getting list of active nodes using colosseumcli')
 
     pipe = subprocess.Popen('colosseumcli rf radiomap', shell=True, stdout=subprocess.PIPE).stdout
@@ -93,7 +93,17 @@ def get_active_nodes_colosseumcli() -> dict:
                 # with more nodes than what we have in the current reservation.
                 # NOTE: None is returned as a string by Colosseum
                 if splitted_line[srn_idx][0] != 'None':
-                    active_nodes[int(splitted_line[node_idx][1])] = int(splitted_line[srn_idx][0])
+                    if (int(splitted_line[node_idx][1]) not in faulty_nodes):
+                        active_nodes[int(splitted_line[node_idx][1])] = int(splitted_line[srn_idx][0])
+                        # print("Adding Active Node SRN ID: ", int(splitted_line[srn_idx][0]), ' Node ID: ', int(splitted_line[node_idx][1]))
+                    # if (int(splitted_line[srn_idx][0] in faulty_nodes)):
+                        # print("Faulty Node in Active Nodes: DEBUG!!!")
+                                # ensure that any faulty nodes are not included in the list
+                    # if int(splitted_line[srn_idx][0]) not in faulty_nodes:
+                    #     print('Adding Active Node SRN ID: ', int(splitted_line[srn_idx][0], ' Node ID: ', int(splitted_line[node_idx][1])))
+                    #     active_nodes[int(splitted_line[node_idx][1])] = int(splitted_line[srn_idx][0])
+                    # else:
+                    #     print('Skipping faulty node: ', int(splitted_line[srn_idx][0]), ' Node ID: ', int(splitted_line[node_idx][1]))
 
     return active_nodes
 
@@ -201,6 +211,7 @@ def get_nodes_ip(active_nodes: list) -> tuple:
     # get my node id
     ip_offset = 100
     my_srn_id = int(my_ip.split('.')[2]) - ip_offset
+    print('My SRN ID:', my_srn_id)
 
     # build IP addresses of other nodes
     ip_base = '192.168.{}.1'
@@ -213,7 +224,10 @@ def get_nodes_ip(active_nodes: list) -> tuple:
             continue
 
         nodes_ip[key] = ip_base.format(ip_offset + srn_id)
-
+    
+    if my_srn_id not in active_nodes.values():
+        logging.error('My SRN ID not found in the list of active nodes - FAULTY NODE. Exiting')
+        exit(1)
     return my_ip, my_node_id, nodes_ip
 
 
@@ -241,12 +255,15 @@ def get_serving_bs_id(my_node_id: int, bs_ue_num: int) -> int:
     return -1
 
 def get_serving_bs_id_custom(my_node_id: int, ue_ids: dict) -> int:
+    print('UE IDs:', ue_ids)
+    print('My Node ID:', my_node_id)
+
     for ue_id, bs_id in ue_ids.items():
         if my_node_id == ue_id:
             return bs_id
-        else:
-            logging.error('This UE does not exist in the UE IDs list. Exiting')
-            exit(1)
+
+    logging.error('This UE: ' + str(my_node_id) + ' does not exist in the UE IDs list. Exiting')
+    exit(1)
 
     logging.warning('Node ID of serving base station not found')
 
@@ -430,11 +447,11 @@ def capture_pcap(iface: str, node_type: str) -> None:
 def is_node_bs(bs_ue_num: int, use_colosseumcli: bool) -> tuple:
 
     if use_colosseumcli:
-        active_nodes = get_active_nodes_colosseumcli()
+        active_nodes = get_active_nodes_colosseumcli([])
     else:
         active_nodes = get_active_nodes_nmap()
 
-    logging.info('Active nodes: ' + str(active_nodes))
+    logging.info('Final Active nodes: ' + str(active_nodes))
 
     # check that we have enough nodes in the reservation for the set
     # number of UEs per base stations. (-1: one node is the BS).
@@ -459,13 +476,17 @@ def is_node_bs(bs_ue_num: int, use_colosseumcli: bool) -> tuple:
 
     return is_bs, my_ip, my_node_id, nodes_ip, bs_ue_num
 
-def is_node_bs_custom(bs_ids: list, use_colosseumcli: bool) -> bool:
+def is_node_bs_custom(bs_ids: list, use_colosseumcli: bool, faulty_nodes: list) -> bool:
     if use_colosseumcli:
-        active_nodes = get_active_nodes_colosseumcli()
+        active_nodes = get_active_nodes_colosseumcli(faulty_nodes)
     else:
         active_nodes = get_active_nodes_nmap()
-
-    logging.info('Active nodes: ' + str(active_nodes))
+    # Log active nodes and remove the faulty nodes
+    for key, node_id in active_nodes.items():
+        if key in faulty_nodes:
+            print('Faulty Node in Active Nodes: ERROR IN get_active_nodes_colosseumcli function. DEBUG!!!')
+ 
+    logging.info('Active nodes in Is BS: ' + str(active_nodes))
 
     if len(active_nodes.keys()) == 0 and use_colosseumcli:
         logging.error('No nodes found, exiting. ' + \
@@ -520,7 +541,8 @@ def start_iperf_server(client_ip) -> None:
 def run_scope(bs_ue_num: int, iperf: bool, use_colosseumcli: bool,
     capture_pkts: bool, config_params: dict, write_config_parameters: bool,
     generic_testbed: bool, node_is_bs: bool, ue_id: int,
-    bs_ids: list, ue_ids: dict):
+    bs_ids: list, ue_ids: dict, faulty_nodes: list
+    ) -> None:
 
     # define name of the tmux session in which commands are run
     tmux_session_name = 'scope'
@@ -548,7 +570,8 @@ def run_scope(bs_ue_num: int, iperf: bool, use_colosseumcli: bool,
         logging.info('my node ID: ' + str(my_node_id))
     else:
         # is_bs, my_ip, my_node_id, nodes_ip, bs_ue_num = is_node_bs(bs_ue_num, use_colosseumcli)
-        is_bs, my_ip, my_node_id, nodes_ip = is_node_bs_custom(bs_ids, use_colosseumcli)
+        is_bs, my_ip, my_node_id, nodes_ip = is_node_bs_custom(bs_ids, use_colosseumcli, faulty_nodes)
+        print('Is BS:', is_bs, 'My IP:', my_ip, 'My Node ID:', my_node_id, 'Nodes IP:', nodes_ip)
 
     # default srsLTE base station IP from the BS perspective
     srslte_bs_ip = '172.16.0.1'
@@ -641,23 +664,28 @@ def run_scope(bs_ue_num: int, iperf: bool, use_colosseumcli: bool,
 
         # find Colosseum Node ID of base station that is serving me
         if not generic_testbed:
-            bs_id = get_serving_bs_id_custom(my_node_id, bs_ue_num)
+            # bs_id = get_serving_bs_id(my_node_id, bs_ue_num)
+            bs_id = get_serving_bs_id_custom(my_node_id, ue_ids)
+            print('Serving BS ID:', bs_id)
+            print('Nodes IP:', nodes_ip)
+            print('SRSLTE Config Dir:', srslte_config_dir)
 
             # get mapping of srsLTE UE addresses and IPs
             srs_col_ip_mapping, _ = get_srsue_ip_mapping(bs_id, nodes_ip, srslte_config_dir)
+            print('Total Mapping: ' + str(srs_col_ip_mapping))
 
             # compute my srsLTE IP and extract it from the returned dictionary
             my_srslte_ip, _ = get_srsue_ip_mapping(bs_id, {my_node_id: my_ip}, srslte_config_dir)
+            print('My srsLTE IP: ' + str(my_srslte_ip))
             my_srslte_ip = my_srslte_ip[my_ip]
-            logging.info('My srsLTE IP: ' + my_srslte_ip)
 
             bs_tr0 = nodes_ip[bs_id]
-            logging.info('Serving BS ID: ' + str(bs_id) + ' serving BS tr0: ' + bs_tr0 + ' serving BS IP: ' + srslte_bs_ip)
+            print('Serving BS ID: ' + str(bs_id) + ' serving BS tr0: ' + bs_tr0 + ' serving BS IP: ' + srslte_bs_ip)
 
             # if bs_id is 1, it will be missing from srs_col_ip_mapping, insert tr0 entry associated with srsLTE BS IP,
             # else replace IP currently assigned to bs_tr0 key
             srs_col_ip_mapping[bs_tr0] = srslte_bs_ip
-            logging.info(srs_col_ip_mapping)
+            print(srs_col_ip_mapping)
 
         # configure srsLTE UE config file based on my ID and user database
         setup_srsue_config(my_node_id, srslte_config_dir)
@@ -707,7 +735,7 @@ if __name__ == '__main__':
         The other arguments are ignored if config file is passed')
     parser.add_argument('--iperf', help='Generate traffic through iperf3, downlink only. Only used if running on Colosseum', action='store_true')
     parser.add_argument('--users-bs', type=int, default=3, help='Maximum number of users per base station')
-    parser.add_argument('--colosseumcli', help='Use colosseumcli APIs to get list of active nodes.\
+    parser.add_argument('--colcli', help='Use colosseumcli APIs to get list of active nodes.\
         This parameter is specific to Colosseum and it is only available in interactive mode', action='store_true')
     parser.add_argument('--write-config-parameters', help='If enabled, writes configuration parameters on file. Done at the base station-side',\
         action='store_true')
@@ -859,7 +887,7 @@ if __name__ == '__main__':
             logging.error('Base station IDs not specified. Will be using the default method.')
         else:
             # Strip the square brackets and parse as a list of ints
-            config['bs_ids'] = list(map(int, config.pop('bs-ids').strip('[]').split(',')))
+            config['bs-ids'] = list(map(int, config.pop('bs-ids').strip('[]').split(',')))
         
         if config.get('ue-ids') is None:
             logging.error('UE IDs not specified. Will be using the default method.')
@@ -869,14 +897,37 @@ if __name__ == '__main__':
             ue_ids_dict = {}
             for item in ue_ids_str.split(','):
                 k, v = map(int, item.split(':'))
-                if v not in config['bs_ids']:
+                if v not in config['bs-ids']:
                     logging.error('BS ' + v + ' has a UE but not listed in BS IDs. Exiting')
                     exit(1)
                 ue_ids_dict[k] = v  # Assuming the value should be a list of integers
-            config['ue_ids'] = ue_ids_dict
+            config['ue-ids'] = ue_ids_dict
             if (len(ue_ids_dict.keys()) == 0):
                 logging.error('No UEs. Exiting')
                 exit(1)
+    
+        if config.get('faulty-nodes') is None:
+            logging.info('No faulty nodes specified. ALL NODES FUNCTIONAL!!!')
+            config['faulty-nodes'] = []
+        else:
+            config['faulty-nodes'] = list(map(int, config.pop('faulty-nodes').strip('[]').split(',')))
+
+# remove faulty nodes from the BS and UE lists.
+            print('Faulty Nodes:', config['faulty-nodes'])
+            print('BS IDs:', config['bs-ids'])
+            bs_ids = [x for x in config['bs-ids'] if x not in config['faulty-nodes']]
+            print('After removing faulty nodes:', bs_ids)
+            keys_to_delete = []
+            for ue, bs in config['ue-ids'].items():
+                if bs in config['faulty-nodes']:
+                    print('UE ID ' + str(ue) + ' is associated with a faulty node: ' + str(bs))
+                    keys_to_delete.append(ue)
+                elif ue in config['faulty-nodes']:
+                    print('UE ID ' + str(ue) + ' is faulty')
+                    keys_to_delete.append(ue)
+
+            for key in keys_to_delete:
+                del config['ue-ids'][key]
 
     print_configuration(config)
     config_params = get_config_params(config)
@@ -894,11 +945,14 @@ if __name__ == '__main__':
     if config_params['ue_config'].get('ul_freq') is None:
         config_params['ue_config']['ul_freq'] = config['ul-freq']
 
-    run_scope(config['users-bs'], config['iperf'],
-        config['colosseumcli'], config['capture-pkts'],
-        config_params, config['write-config-parameters'],
-        config['generic-testbed'], config['node-is-bs'],config['ue-id'],
-        config['bs_ids'], config['ue_ids'])
+    is_bs, my_ip, my_node_id, nodes_ip = is_node_bs_custom(config['bs-ids'], config['colosseumcli'], config['faulty-nodes'])
+    if my_node_id not in config['faulty-nodes']:
+        print('Node ID:', my_node_id, 'is not faulty. Running scope...')
+        run_scope(config['users-bs'], config['iperf'],
+            config['colosseumcli'], config['capture-pkts'],
+            config_params, config['write-config-parameters'],
+            config['generic-testbed'], config['node-is-bs'],config['ue-id'],
+            config['bs-ids'], config['ue-ids'], config['faulty-nodes'])
 
     # set LTE transceiver state to active
     time.sleep(2)
